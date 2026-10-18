@@ -1,0 +1,59 @@
+# METRIC 2: p95 request latency (user experience / SLO)
+#
+# "Keep the slowest 5% of requests under 100 ms." Used by teams that scale to an SLO.
+#
+# Latency is NOT additive across pods (you can't sum p95s), so this trigger uses
+# `metricType: Value`. The HPA then runs a proportional controller on the value:
+#     replicas = ceil(currentReplicas * p95 / threshold)
+#   e.g. 2 pods, p95 = 300 ms, threshold 100 ms  ->  6 pods
+# (The default AverageValue type would compute ceil(p95 / threshold), which is meaningless here.)
+#
+# Notes
+#  - histogram_quantile() returns NaN when there is no traffic. `> 0 or vector(0)`
+#    turns NaN into 0 so KEDA gets a clean "no latency" value instead of an error.
+#  - Precision is limited by histogram buckets (...0.05, 0.1, 0.25, 0.5, 1...), and the
+#    value is interpolated within a bucket. Put the threshold on a bucket boundary.
+#
+# Weaknesses (all observed while testing this repo):
+#  - It only works when latency is CAPACITY-bound (pods saturated -> slow -> more pods ->
+#    faster). If the slowness comes from a database or upstream, adding pods does nothing
+#    and this scaler runs to maxReplicaCount (that is exactly what loadgen/latency.yaml does).
+#  - A server-side histogram times only the handler. With the CPU-saturating load
+#    (loadgen/saturate.yaml) p95 stayed ~5 ms while the single pod was throttled, and this
+#    scaler even scaled DOWN to 1 pod. Real setups measure latency at the ingress/mesh
+#    (e.g. nginx_ingress_controller_request_duration_seconds), which includes queueing.
+#  - Used alone, the proportional rule shrinks the Deployment whenever latency is low,
+#    until latency rises again. Production pairs it with a capacity signal: see 06-combined.yaml.
+#
+# Test:  make scaler S=02-latency-p95 && make load L=latency
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: podinfo-latency
+  namespace: app
+spec:
+  scaleTargetRef:
+    name: podinfo-d
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - { type: Pods, value: 4, periodSeconds: 15 }
+            - { type: Percent, value: 100, periodSeconds: 15 }
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 60
+          policies:
+            - { type: Percent, value: 50, periodSeconds: 30 }
+  triggers:
+    - type: prometheus
+      metricType: Value # see header: latency is not additive
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring:9090
+        query: >-
+          histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace="app",job="podinfo-svc",path!~"readyz|healthz|metrics"}[1m]))) > 0 or vector(0)
+        threshold: "0.1" # seconds

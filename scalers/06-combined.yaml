@@ -1,0 +1,74 @@
+# COMBINED: all four web metrics on one ScaledObject (what production usually looks like)
+#
+# Each trigger becomes its own metric on the HPA. For every sync the HPA computes the
+# replica count each trigger asks for and uses the HIGHEST one:
+#
+#     replicas = max( rps_replicas, latency_replicas, concurrency_replicas, cpu_replicas )
+#
+# So the Deployment scales to whichever signal is hottest right now, and only scales
+# down when ALL signals are low. (To combine them differently, e.g. weighted, use
+# `advanced.scalingModifiers`.)
+#
+# Queue backlog (05) targets a different Deployment (worker), so it stays a separate
+# ScaledObject.
+#
+# Test:  make scaler S=06-combined, then any of:  make load L=rps | slow | saturate | latency
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: podinfo-combined
+  namespace: app
+spec:
+  scaleTargetRef:
+    name: podinfo-d
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  # Safety net: if the metric source (Prometheus) fails 3 polls in a row, hold 3 replicas
+  # instead of freezing at whatever the count happened to be. Without this, a Prometheus
+  # outage during a traffic spike means no scale-up at all.
+  fallback:
+    failureThreshold: 3
+    replicas: 3
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - { type: Pods, value: 4, periodSeconds: 15 }
+            - { type: Percent, value: 100, periodSeconds: 15 }
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 60
+          policies:
+            - { type: Percent, value: 50, periodSeconds: 30 }
+  triggers:
+    - type: prometheus
+      name: rps
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring:9090
+        query: >-
+          sum(rate(http_request_duration_seconds_count{namespace="app",job="podinfo-svc",path!~"readyz|healthz|metrics"}[1m])) or vector(0)
+        threshold: "50"
+    - type: prometheus
+      name: latency-p95
+      metricType: Value
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring:9090
+        query: >-
+          histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace="app",job="podinfo-svc",path!~"readyz|healthz|metrics"}[1m]))) > 0 or vector(0)
+        threshold: "0.1"
+    - type: prometheus
+      name: concurrency
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring:9090
+        query: >-
+          sum(rate(http_request_duration_seconds_sum{namespace="app",job="podinfo-svc",path!~"readyz|healthz|metrics"}[1m])) or vector(0)
+        threshold: "5"
+    - type: prometheus
+      name: cpu
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring:9090
+        query: >-
+          sum(rate(container_cpu_usage_seconds_total{namespace="app",pod=~"podinfo-.*",container="podinfo"}[1m]))
+        threshold: "0.035"

@@ -1,0 +1,51 @@
+# METRIC 5: Queue backlog (jobs waiting) -> scales the WORKER Deployment, not podinfo
+#
+# The most common KEDA scenario: "run one worker per N pending jobs, and none when idle."
+# The queue depth reaches Prometheus through an exporter (here redis_exporter ->
+# redis_key_size{key="jobs"} = LLEN of the list); the same pattern works for
+# rabbitmq_exporter, kafka-exporter (consumer lag), sqs exporters, etc.
+#
+# AverageValue:  replicas = ceil(backlog / threshold)
+#   e.g. 100 pending jobs, threshold 10  ->  10 workers (capped by maxReplicaCount)
+#
+# Scale to zero:
+#   minReplicaCount: 0 means no workers (and no cost) while the queue is empty.
+#   `activationThreshold: "0"` = go 0 -> 1 as soon as backlog > 0. Beyond that,
+#   `threshold` drives 1 -> N.
+#
+# Test:  make scaler S=05-queue-backlog && make load L=queue
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-queue
+  namespace: app
+spec:
+  scaleTargetRef:
+    name: worker-d
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  # With minReplicaCount: 0, KEDA itself (not the HPA) decides 0 <-> 1, polling every
+  # pollingInterval seconds. For scalers with minReplicaCount >= 1 this setting is
+  # irrelevant (the HPA's own 15s sync loop drives scaling), so they omit it.
+  pollingInterval: 15
+  cooldownPeriod: 30 # seconds of empty queue before scaling 1 -> 0
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - { type: Percent, value: 100, periodSeconds: 15 }
+        scaleDown:
+          stabilizationWindowSeconds: 30
+          policies:
+            - { type: Percent, value: 50, periodSeconds: 15 }
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring:9090
+        # `or vector(0)` -> report 0 (not "no data") if the key does not exist yet.
+        query: >-
+          sum(redis_key_size{namespace="app",key="jobs"}) or vector(0)
+        threshold: "10"
+        activationThreshold: "0"

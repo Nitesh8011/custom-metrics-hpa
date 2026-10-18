@@ -1,0 +1,41 @@
+# Load for METRIC 4 (CPU): ~3000 req/s of fast requests.
+#
+# podinfo spends only ~0.05 ms of CPU per request, so it takes thousands of req/s to
+# stress it. At 3000 req/s the total need is ~0.1-0.14 cores, but ONE pod is limited to
+# 0.1 cores and gets CPU-throttled (fortio only manages ~2600 req/s against a single pod).
+#
+#   - 04-cpu scaler:         ~0.1 cores / 0.035 per pod -> 3 pods, settles near 35m per pod
+#   - 01-rps scaler:         ~2700 / 50 -> runs to maxReplicaCount (10)
+#   - 02-latency-p95 scaler: does NOT react. podinfo's histogram times only the handler, so
+#                            CPU throttling / queueing before the handler is invisible in p95
+#                            (it stays ~5 ms). Observed: this scaler scaled DOWN to 1 pod while
+#                            that pod was saturated. Production teams measure latency at the
+#                            ingress/mesh (which includes queueing) and pair it with a
+#                            capacity signal. Use loadgen/latency.yaml to exercise the latency scaler.
+#
+# Run: make load L=saturate      Stop: make stop-load
+#
+# Connections are recycled (-connection-reuse 100:200: a connection is replaced after that many
+# requests). Kubernetes Services balance per CONNECTION, so with fortio's default of
+# never-ending keep-alive connections, pods added by the autoscaler would receive no traffic
+# from this running load and the per-pod dashboards would show one busy pod and idle ones.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-saturate
+  namespace: app
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: fortio
+          image: fortio/fortio:1.76.0
+          args: ["load", "-qps", "3000", "-c", "32", "-t", "10m", "-connection-reuse", "100:200", "-quiet", "http://podinfo-svc.app/"]
+          resources:
+            requests: { cpu: 500m, memory: 64Mi }

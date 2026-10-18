@@ -1,0 +1,32 @@
+# Load for METRIC 5 (queue backlog): push 100 jobs onto the Redis list "jobs".
+#   - Backlog jumps to 100. 05-queue-backlog scaler: 100 / 10 -> 10 workers (0 -> 10).
+#   - Each worker takes 2 s per job, so the queue drains in ~20 s and the workers
+#     then scale back down to 0 after the cooldown.
+#
+# Run: make load L=queue   (change JOBS below for a bigger/smaller burst)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-queue
+  namespace: app
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: producer
+          image: redis:8.8-alpine
+          env:
+            - name: JOBS
+              value: "100"
+          command:
+            - sh
+            - -c
+            - |
+              i=1
+              while [ "$i" -le "$JOBS" ]; do echo "RPUSH jobs job-$i"; i=$((i+1)); done | redis-cli -h redis-svc > /dev/null
+              echo "pushed $JOBS jobs; backlog now: $(redis-cli -h redis-svc LLEN jobs)"

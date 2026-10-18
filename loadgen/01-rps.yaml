@@ -1,0 +1,32 @@
+# Load for METRIC 1 (requests/sec): a steady 200 req/s of fast requests.
+#   - 01-rps scaler:         200 / 50 per pod  -> ~4 pods
+#   - 03-concurrency scaler: stays low (requests finish in ~1 ms), so it does NOT scale.
+#
+# Run: make load L=rps      Stop: make stop-load
+#
+# fortio flags: -qps = target req/s, -c = parallel connections, -t = duration
+#
+# Connections are recycled (-connection-reuse 10:20: a connection is replaced after that many
+# requests). Kubernetes Services balance per CONNECTION, so with fortio's default of
+# never-ending keep-alive connections, pods added by the autoscaler would receive no traffic
+# from this running load and the per-pod dashboards would show one busy pod and idle ones.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-rps
+  namespace: app
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: fortio
+          image: fortio/fortio:1.76.0
+          args: ["load", "-qps", "200", "-c", "8", "-t", "10m", "-connection-reuse", "10:20", "-quiet", "http://podinfo-svc.app/"]
+          resources:
+            requests: { cpu: 100m, memory: 32Mi }

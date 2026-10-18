@@ -1,0 +1,127 @@
+# "worker" tier: a queue consumer scaled on BACKLOG (jobs waiting in a queue).
+# This is the classic KEDA use case, with the queue depth reaching KEDA through
+# Prometheus (the same pattern orgs use with rabbitmq_exporter, sqs-exporter, etc.).
+#
+#   producer (loadgen/queue.yaml) --RPUSH--> redis list "jobs" --BLPOP--> worker pods
+#                                                  |
+#                                      redis_exporter -> Prometheus -> KEDA
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-d
+  namespace: app
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:8.8-alpine
+          # No persistence: this is a throwaway queue for the demo.
+          args: ["--save", "", "--appendonly", "no"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 128Mi }
+        # Sidecar that turns Redis state into Prometheus metrics. The one we use
+        # is redis_key_size{key="jobs"} = LLEN of the "jobs" list (the backlog).
+        - name: exporter
+          image: oliver006/redis_exporter:v1.94.0-alpine
+          env:
+            - name: REDIS_ADDR
+              value: redis://localhost:6379
+            - name: REDIS_EXPORTER_CHECK_SINGLE_KEYS
+              value: db0=jobs
+          ports:
+            - name: metrics
+              containerPort: 9121
+          resources:
+            requests: { cpu: 20m, memory: 16Mi }
+            limits: { memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-svc
+  namespace: app
+  labels:
+    app: redis
+spec:
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+    - name: metrics
+      port: 9121
+      targetPort: metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-sm
+  namespace: app
+  labels:
+    app: redis
+spec:
+  selector:
+    matchLabels:
+      app: redis
+  endpoints:
+    - port: metrics
+      interval: 15s
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-d
+  namespace: app
+  labels:
+    app: worker
+spec:
+  # `replicas` unset on purpose: KEDA owns it (and may scale it to 0).
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+        - name: worker
+          image: redis:8.8-alpine
+          env:
+            - name: JOB_SECONDS # simulated work per job => each worker drains 1/JOB_SECONDS jobs/s
+              value: "2"
+          command:
+            - sh
+            - -c
+            - |
+              while true; do
+                out=$(redis-cli -h redis-svc --raw BLPOP jobs 5 2>/dev/null) || { sleep 1; continue; }
+                job=$(echo "$out" | tail -n 1)
+                if [ -n "$job" ]; then
+                  echo "processing $job"
+                  sleep "$JOB_SECONDS"
+                fi
+              done
+          resources:
+            requests: { cpu: 20m, memory: 16Mi }
+            limits: { memory: 64Mi }

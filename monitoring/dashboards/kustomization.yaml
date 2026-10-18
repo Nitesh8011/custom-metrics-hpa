@@ -1,0 +1,34 @@
+# Turns each dashboard JSON into its own ConfigMap labelled `grafana_dashboard: "1"`.
+# Grafana's sidecar (part of kube-prometheus-stack) watches for that label and hot-loads
+# the dashboards, so there is no manual import step. One ConfigMap per dashboard keeps each
+# well under Kubernetes' annotation size limit (kubectl apply stores a copy of the object).
+#
+# The JSON files are generated: edit generate.py and run `python3 monitoring/dashboards/generate.py`.
+#
+# Apply:  kubectl apply -k monitoring/dashboards     (or: make dashboards)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: monitoring
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    grafana_dashboard: "1"
+configMapGenerator:
+  - name: keda-prometheus-dashboard
+    files:
+      - keda-prometheus.json
+  - name: keda-1-rps-dashboard
+    files:
+      - keda-1-rps.json
+  - name: keda-2-latency-dashboard
+    files:
+      - keda-2-latency.json
+  - name: keda-3-concurrency-dashboard
+    files:
+      - keda-3-concurrency.json
+  - name: keda-4-cpu-dashboard
+    files:
+      - keda-4-cpu.json
+  - name: keda-5-queue-dashboard
+    files:
+      - keda-5-queue.json

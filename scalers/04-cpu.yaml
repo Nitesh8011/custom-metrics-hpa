@@ -1,0 +1,47 @@
+# METRIC 4: CPU usage, sourced from Prometheus (cAdvisor)
+#
+# Same idea as the built-in HPA CPU metric, but read from Prometheus
+# (container_cpu_usage_seconds_total, exported by the kubelet/cAdvisor). Orgs do this to:
+#   - drop the metrics-server dependency,
+#   - control the window/aggregation (e.g. only the app container, 1m rate, max over pods),
+#   - combine CPU with other Prometheus signals in one ScaledObject.
+#
+# Query returns TOTAL cores used by all podinfo pods.
+# AverageValue:  replicas = ceil(total_cores / threshold)
+#   threshold 0.035 cores = 70% of the 50m CPU request per pod.
+#   e.g. 0.14 cores used in total -> 4 pods
+#
+# Do not combine this with a VPA that manages CPU on the same Deployment: both would
+# react to the same signal and fight (see README, "KEDA + VPA").
+#
+# Test:  make scaler S=04-cpu && make load L=saturate
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: podinfo-cpu
+  namespace: app
+spec:
+  scaleTargetRef:
+    name: podinfo-d
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - { type: Pods, value: 4, periodSeconds: 15 }
+            - { type: Percent, value: 100, periodSeconds: 15 }
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 60
+          policies:
+            - { type: Percent, value: 50, periodSeconds: 30 }
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring:9090
+        query: >-
+          sum(rate(container_cpu_usage_seconds_total{namespace="app",pod=~"podinfo-.*",container="podinfo"}[1m]))
+        threshold: "0.035"

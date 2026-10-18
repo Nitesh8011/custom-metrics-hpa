@@ -1,0 +1,51 @@
+# METRIC 1: Requests per second (traffic / throughput)
+#
+# The most common application autoscaling signal. "Each pod should serve about N req/s."
+#
+# Query returns the TOTAL req/s across all pods. For the default AverageValue
+# metric type the HPA computes:  replicas = ceil(total_rps / threshold)
+#   e.g. 200 req/s with threshold 50  ->  4 pods
+#
+# Notes
+#  - Uses http_request_duration_seconds_count (not http_requests_total) because it
+#    has a `path` label, so probe traffic and Prometheus' own /metrics scrapes
+#    (podinfo counts both as requests) can be excluded.
+#  - rate(...[1m]) with a 15s scrape interval = ~4 samples; smooth enough, still quick.
+#  - The selector {namespace="app",job="podinfo-svc"} depends on names: `namespace` is where
+#    the pods run and `job` defaults to the SERVICE name (podinfo-svc), not the Deployment
+#    or ServiceMonitor name. Rename the Service and this query silently returns 0.
+#
+# Weakness: RPS says nothing about how EXPENSIVE a request is. A few slow requests
+# can overload pods while RPS stays low (see 03-concurrency.yaml for that case).
+#
+# Test:  make scaler S=01-rps && make load L=rps
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: podinfo-rps # same name in every web scaler file, so `kubectl apply` simply swaps the triggers
+  namespace: app
+spec:
+  scaleTargetRef:
+    name: podinfo-d
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - { type: Pods, value: 4, periodSeconds: 15 }
+            - { type: Percent, value: 100, periodSeconds: 15 }
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 60 # short for the demo; production commonly 300s+
+          policies:
+            - { type: Percent, value: 50, periodSeconds: 30 }
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring:9090
+        query: >-
+          sum(rate(http_request_duration_seconds_count{namespace="app",job="podinfo-svc",path!~"readyz|healthz|metrics"}[1m])) or vector(0)
+        threshold: "50"

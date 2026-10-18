@@ -1,0 +1,94 @@
+# "web" tier: the Deployment that gets scaled on traffic metrics
+# (requests/sec, p95 latency, concurrency, CPU).
+#
+# podinfo is a tiny Go service that already exposes Prometheus metrics on /metrics:
+#   http_request_duration_seconds{_bucket,_sum,_count}{method,path,status}
+# and has endpoints that make load testing easy:
+#   /            fast response
+#   /delay/{s}   responds after s seconds (simulates a slow dependency)
+#   /status/{c}  responds with HTTP status c
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo-d
+  namespace: app
+  labels:
+    app: podinfo
+spec:
+  # `replicas` is intentionally NOT set: KEDA/HPA owns the replica count, and a
+  # `replicas: N` here would be re-applied (resetting the scale) on every `kubectl apply`.
+  selector:
+    matchLabels:
+      app: podinfo
+  template:
+    metadata:
+      labels:
+        app: podinfo
+    spec:
+      containers:
+        - name: podinfo
+          image: ghcr.io/stefanprodan/podinfo:6.15.0
+          command:
+            - ./podinfo
+            - --port=9898
+            - --level=warn # keep per-request access logs out of the pod logs under load
+          ports:
+            - name: http
+              containerPort: 9898
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # Requests/limits matter: the CPU scaler needs a per-pod baseline, and
+          # the CPU limit is what makes latency climb when a pod saturates.
+          # podinfo needs only ~0.05 ms of CPU per request, so the pod is sized small
+          # (50m request / 100m limit) to make saturation reachable with a laptop load test.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-svc
+  namespace: app
+  labels:
+    app: podinfo
+spec:
+  selector:
+    app: podinfo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# Tells Prometheus (via the operator) to scrape every podinfo pod's /metrics.
+# Discovered because prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: podinfo-sm
+  namespace: app
+  labels:
+    app: podinfo
+spec:
+  selector:
+    matchLabels:
+      app: podinfo
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

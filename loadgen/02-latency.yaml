@@ -1,0 +1,38 @@
+# Load for METRIC 2 (p95 latency): 10 connections hitting an endpoint that answers after 1 s.
+#
+# Every request takes ~1 s, so p95 latency is far above the 100 ms target no matter how
+# many pods exist (podinfo cannot be made "capacity-bound" slow, see below).
+#   - 02-latency-p95 scaler: ratio = p95 / 0.1 is large -> replicas = ceil(current * ratio),
+#                            so it jumps to maxReplicaCount (10) within a couple of syncs.
+#   - Note p95 reads ~2.4 s, not 1 s: the histogram has buckets at 1 s and 2.5 s, and
+#     histogram_quantile() interpolates inside the bucket. Bucket choice limits precision.
+#   - The p95 stays high even at 10 pods. That is the "runaway" trap of latency scaling when
+#     the slowness is NOT caused by lack of pods. In a real service the slowness usually IS
+#     partly capacity, which is why latency is paired with a capacity signal (06-combined.yaml).
+#
+# Run: make scaler S=02-latency-p95 && make load L=latency      Stop: make stop-load
+#
+# Connections are recycled (-connection-reuse 3:6: a connection is replaced after that many
+# requests). Kubernetes Services balance per CONNECTION, so with fortio's default of
+# never-ending keep-alive connections, pods added by the autoscaler would receive no traffic
+# from this running load and the per-pod dashboards would show one busy pod and idle ones.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-latency
+  namespace: app
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: fortio
+          image: fortio/fortio:1.76.0
+          args: ["load", "-qps", "0", "-c", "10", "-t", "10m", "-connection-reuse", "3:6", "-quiet", "http://podinfo-svc.app/delay/1"]
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }

@@ -1,0 +1,20 @@
+# KEDA values (chart 2.21.0)
+#
+# Install (AFTER kube-prometheus-stack, because the ServiceMonitor CRD must exist):
+#   helm install keda kedacore/keda --version 2.21.0 -n keda --create-namespace -f cluster/keda-values.yaml
+#
+# KEDA itself is only a *consumer* of Prometheus here (the `prometheus` trigger
+# queries it). The settings below also make Prometheus scrape KEDA, so the
+# Grafana dashboard can show what KEDA computed (scaler metric value, errors).
+
+prometheus:
+  metricServer:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      interval: 15s
+  operator:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      interval: 15s

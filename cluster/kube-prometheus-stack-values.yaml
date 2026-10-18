@@ -1,0 +1,67 @@
+# kube-prometheus-stack values (chart 92.10.1)
+#
+# Install:  helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#             --version 92.10.1 -n monitoring --create-namespace -f cluster/kube-prometheus-stack-values.yaml
+#
+# Tuned for a small local cluster (minikube). Everything that matters for
+# KEDA + Prometheus is commented; the rest just trims memory/noise.
+
+# --- Not needed for this demo (saves RAM) -----------------------------------
+alertmanager:
+  enabled: false
+
+# minikube doesn't expose these control-plane endpoints to Prometheus, so
+# scraping them only produces permanently-"down" targets and noisy rules.
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+defaultRules:
+  rules:
+    alertmanager: false
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+
+# --- Prometheus (the metrics source KEDA queries) ---------------------------
+prometheus:
+  prometheusSpec:
+    # IMPORTANT: by default the operator only picks up ServiceMonitors that
+    # carry this Helm release's label. Setting these to false makes Prometheus
+    # discover ServiceMonitors / PodMonitors / rules in ANY namespace, which is
+    # what lets our `app` namespace be scraped without extra labels.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+
+    # Fast scrape + evaluation so autoscaling reacts within seconds and the
+    # dashboard looks "live". Production usually runs 30-60s.
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+
+    retention: 6h
+    resources:
+      requests:
+        cpu: 200m
+        memory: 400Mi
+      limits:
+        memory: 1Gi
+
+# --- Grafana (dashboards) ----------------------------------------------------
+grafana:
+  # Demo credentials only. Do not reuse outside a local cluster.
+  adminUser: admin
+  adminPassword: admin
+  defaultDashboardsTimezone: browser
+  # The sidecar (enabled by default in this chart) loads every ConfigMap labelled
+  # `grafana_dashboard: "1"` from ANY namespace, so monitoring/dashboards/ is
+  # picked up automatically.
